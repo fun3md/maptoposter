@@ -4,11 +4,13 @@ Test script for svg_to_gcode.py
 
 This script creates a simple SVG file with various shapes and colors,
 then converts it to G-code using the svg_to_gcode.py script.
+It also compares the results with and without path optimization.
 """
 
 import os
 import sys
 import subprocess
+import math
 from xml.dom import minidom
 
 def create_test_svg(filename="test.svg", width=100, height=100):
@@ -69,37 +71,110 @@ def create_test_svg(filename="test.svg", width=100, height=100):
     print(f"Created test SVG file: {filename}")
     return filename
 
+def calculate_travel_distance(gcode_file):
+    """Calculate the total travel distance in the G-code file"""
+    total_distance = 0
+    prev_x, prev_y = 0, 0
+    
+    with open(gcode_file, "r") as f:
+        for line in f:
+            # Look for G0 (rapid move) commands
+            if line.strip().startswith("G0 "):
+                # Extract X and Y coordinates
+                parts = line.strip().split()
+                x, y = None, None
+                
+                for part in parts:
+                    if part.startswith("X"):
+                        x = float(part[1:])
+                    elif part.startswith("Y"):
+                        y = float(part[1:])
+                
+                if x is not None and y is not None:
+                    # Calculate distance from previous position
+                    distance = math.sqrt((x - prev_x)**2 + (y - prev_y)**2)
+                    total_distance += distance
+                    
+                    # Update previous position
+                    prev_x, prev_y = x, y
+    
+    return total_distance
+
 def main():
     # Create test SVG
     svg_file = create_test_svg()
     
-    # Convert to G-code
-    try:
-        cmd = [sys.executable, "svg_to_gcode.py", svg_file, "--min-power", "100", "--max-power", "800"]
-        print(f"Running: {' '.join(cmd)}")
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        print(result.stdout)
+    # Test both with and without optimization
+    results = []
+    
+    for optimize in [True, False]:
+        # Set output filename based on optimization setting
+        output_suffix = "_optimized" if optimize else "_unoptimized"
+        output_file = os.path.splitext(svg_file)[0] + output_suffix + ".nc"
         
-        # Check if output file was created
-        gcode_file = os.path.splitext(svg_file)[0] + ".nc"
-        if os.path.exists(gcode_file):
-            print(f"Successfully created G-code file: {gcode_file}")
+        # Build command
+        cmd = [
+            sys.executable, 
+            "svg_to_gcode.py", 
+            svg_file, 
+            "--output", output_file,
+            "--min-power", "100", 
+            "--max-power", "800"
+        ]
+        
+        if not optimize:
+            cmd.append("--no-optimize")
+        
+        # Run command
+        print(f"\nRunning: {' '.join(cmd)}")
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            print(result.stdout)
             
-            # Print first few lines of G-code
-            with open(gcode_file, "r") as f:
-                lines = f.readlines()
-                print("\nFirst 10 lines of G-code:")
-                for i, line in enumerate(lines[:10]):
-                    print(f"{i+1:3d} | {line.strip()}")
-                print("...")
-                print(f"Total lines: {len(lines)}")
-        else:
-            print(f"Error: G-code file not created: {gcode_file}")
-            
-    except subprocess.CalledProcessError as e:
-        print(f"Error running svg_to_gcode.py: {e}")
-        print(f"stdout: {e.stdout}")
-        print(f"stderr: {e.stderr}")
+            # Check if output file was created
+            if os.path.exists(output_file):
+                print(f"Successfully created G-code file: {output_file}")
+                
+                # Calculate travel distance
+                travel_distance = calculate_travel_distance(output_file)
+                
+                # Print first few lines of G-code
+                with open(output_file, "r") as f:
+                    lines = f.readlines()
+                    print(f"\nFirst 10 lines of G-code ({output_file}):")
+                    for i, line in enumerate(lines[:10]):
+                        print(f"{i+1:3d} | {line.strip()}")
+                    print("...")
+                    print(f"Total lines: {len(lines)}")
+                    print(f"Total travel distance: {travel_distance:.2f} units")
+                
+                # Store results for comparison
+                results.append({
+                    "file": output_file,
+                    "optimized": optimize,
+                    "lines": len(lines),
+                    "travel_distance": travel_distance
+                })
+            else:
+                print(f"Error: G-code file not created: {output_file}")
+                
+        except subprocess.CalledProcessError as e:
+            print(f"Error running svg_to_gcode.py: {e}")
+            print(f"stdout: {e.stdout}")
+            print(f"stderr: {e.stderr}")
+    
+    # Compare results
+    if len(results) == 2:
+        opt = next(r for r in results if r["optimized"])
+        unopt = next(r for r in results if not r["optimized"])
+        
+        distance_reduction = unopt["travel_distance"] - opt["travel_distance"]
+        distance_percent = (distance_reduction / unopt["travel_distance"]) * 100 if unopt["travel_distance"] > 0 else 0
+        
+        print("\n=== Optimization Results ===")
+        print(f"Unoptimized travel distance: {unopt['travel_distance']:.2f} units")
+        print(f"Optimized travel distance: {opt['travel_distance']:.2f} units")
+        print(f"Distance reduction: {distance_reduction:.2f} units ({distance_percent:.1f}%)")
     
     print("\nTest completed.")
 

@@ -4,7 +4,8 @@ SVG to G-code Converter for Laser Cutting
 
 This script converts SVG files to G-code for laser cutting machines.
 It extracts paths from the SVG, considers only the viewable area,
-and maps SVG colors to laser power settings.
+maps SVG colors to laser power settings, and optimizes path order
+to minimize travel distances.
 """
 
 import argparse
@@ -15,6 +16,7 @@ import numpy as np
 from svgpathtools import svg2paths, Path, Line, CubicBezier, QuadraticBezier, Arc
 import svgpathtools
 from xml.dom import minidom
+import math
 
 # Register the SVG namespace
 ET.register_namespace("", "http://www.w3.org/2000/svg")
@@ -22,8 +24,21 @@ ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
 
 def hex_to_rgb(hex_color):
     """Convert hex color to RGB values (0-255)"""
+    # Handle empty strings or invalid inputs
+    if not hex_color or not isinstance(hex_color, str):
+        return (0, 0, 0)  # Default to black
+        
     hex_color = hex_color.lstrip('#')
-    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    
+    # Check if we have a valid hex color after stripping #
+    if len(hex_color) != 6:
+        return (0, 0, 0)  # Default to black for invalid hex
+        
+    try:
+        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    except ValueError:
+        # If conversion fails, return black
+        return (0, 0, 0)
 
 def rgb_to_grayscale(rgb):
     """Convert RGB to grayscale using standard luminance formula"""
@@ -34,19 +49,28 @@ def color_to_power(color, min_power, max_power):
     
     Darker colors (lower grayscale values) get higher power
     """
-    if color.startswith('#'):
-        rgb = hex_to_rgb(color)
-        gray = rgb_to_grayscale(rgb)
-    else:
-        # Handle named colors or other formats - default to medium power
-        gray = 128
-    
-    # Normalize grayscale to 0-1 and invert (darker = higher power)
-    power_factor = 1 - (gray / 255)
-    
-    # Scale to min-max power range
-    power = min_power + power_factor * (max_power - min_power)
-    return int(power)
+    # Handle None or empty string
+    if not color:
+        # Default to medium power
+        return int(min_power + (max_power - min_power) / 2)
+        
+    try:
+        if isinstance(color, str) and color.startswith('#'):
+            rgb = hex_to_rgb(color)
+            gray = rgb_to_grayscale(rgb)
+        else:
+            # Handle named colors or other formats - default to medium power
+            gray = 128
+        
+        # Normalize grayscale to 0-1 and invert (darker = higher power)
+        power_factor = 1 - (gray / 255)
+        
+        # Scale to min-max power range
+        power = min_power + power_factor * (max_power - min_power)
+        return int(power)
+    except Exception:
+        # If any error occurs, return medium power as a fallback
+        return int(min_power + (max_power - min_power) / 2)
 
 def get_svg_viewbox(svg_file):
     """Extract viewBox from SVG file"""
@@ -94,7 +118,66 @@ def get_svg_dimensions(svg_file):
     
     return width, height, viewbox
 
-def svg_to_gcode(svg_file, output_file, min_power=0, max_power=1000, feedrate=1000, reposition_speed=3000):
+def calculate_distance(point1, point2):
+    """Calculate Euclidean distance between two points"""
+    return math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
+
+def optimize_path_order(paths, attributes, min_power):
+    """Optimize the order of paths to minimize travel distance
+    
+    Uses a nearest-neighbor algorithm to find the next closest path
+    """
+    # Filter out paths with power <= min_power and prepare path data
+    path_data = []
+    for i, (path, attr) in enumerate(zip(paths, attributes)):
+        # Get stroke color with fallback to black
+        stroke = attr.get('stroke', '#000000') if attr else '#000000'
+        
+        # Skip paths with no stroke or 'none' stroke
+        if not stroke or stroke.lower() == 'none':
+            continue
+            
+        power = color_to_power(stroke, min_power, 1000)  # Use any max_power, we just need to check min
+        
+        if power > min_power:
+            start_point = (path.start.real, path.start.imag)
+            end_point = (path.end.real, path.end.imag)
+            path_data.append({
+                'index': i,
+                'path': path,
+                'attr': attr,
+                'start': start_point,
+                'end': end_point,
+                'visited': False
+            })
+    
+    # Optimize path order
+    optimized_paths = []
+    current_point = (0, 0)  # Start from origin
+    
+    while path_data:
+        # Find the closest unvisited path
+        closest_idx = -1
+        min_distance = float('inf')
+        
+        for i, data in enumerate(path_data):
+            # Calculate distance from current point to path start
+            distance = calculate_distance(current_point, data['start'])
+            
+            if distance < min_distance:
+                min_distance = distance
+                closest_idx = i
+        
+        # Add the closest path to the optimized list
+        next_path = path_data.pop(closest_idx)
+        optimized_paths.append((next_path['path'], next_path['attr']))
+        
+        # Update current point to the end of the path we just processed
+        current_point = next_path['end']
+    
+    return optimized_paths
+
+def svg_to_gcode(svg_file, output_file, min_power=0, max_power=1000, feedrate=1000, reposition_speed=3000, optimize=True):
     """Convert SVG file to G-code for laser cutting"""
     
     # Get SVG dimensions and viewBox
@@ -109,6 +192,12 @@ def svg_to_gcode(svg_file, output_file, min_power=0, max_power=1000, feedrate=10
     # Parse SVG paths
     paths, attributes = svg2paths(svg_file)
     
+    # Optimize path order if requested
+    if optimize:
+        path_attr_pairs = optimize_path_order(paths, attributes, min_power)
+    else:
+        path_attr_pairs = list(zip(paths, attributes))
+    
     # Open output file
     with open(output_file, 'w') as f:
         # Write G-code header
@@ -116,10 +205,15 @@ def svg_to_gcode(svg_file, output_file, min_power=0, max_power=1000, feedrate=10
         f.write(f"G0 X0 Y0 S0\n")
         f.write(f"G1 M4 F{feedrate}\n")
         
-        # Process each path
-        for i, (path, attr) in enumerate(zip(paths, attributes)):
+        # Process each path in the optimized order
+        for path, attr in path_attr_pairs:
             # Get path color and calculate laser power
-            stroke = attr.get('stroke', '#000000')
+            stroke = attr.get('stroke', '#000000') if attr else '#000000'
+            
+            # Skip paths with no stroke or 'none' stroke
+            if not stroke or stroke.lower() == 'none':
+                continue
+                
             power = color_to_power(stroke, min_power, max_power)
             
             # Skip paths with zero power
@@ -132,7 +226,8 @@ def svg_to_gcode(svg_file, output_file, min_power=0, max_power=1000, feedrate=10
             start_y = start.imag
             
             # Move to start position with laser off
-            f.write(f"G0 X{start_x:.4f} Y{start_y:.4f} S0\n")
+            f.write(f"G0 X{start_x:.4f} Y{start_y:.4f} S0 F{reposition_speed}\n")
+            f.write(f"G1 F{feedrate}\n")
             f.write(f"M4\n")
             
             # Process each segment in the path
@@ -154,7 +249,7 @@ def svg_to_gcode(svg_file, output_file, min_power=0, max_power=1000, feedrate=10
         
         # Write G-code footer
         f.write(f"M5 S{min_power} F{feedrate}\n")
-        f.write("G0 X0 Y0 Z0 (move back to origin)\n")
+        f.write(f"G0 X0 Y0 Z0 F{reposition_speed} (move back to origin)\n")
 
 def main():
     parser = argparse.ArgumentParser(description='Convert SVG to G-code for laser cutting')
@@ -164,6 +259,7 @@ def main():
     parser.add_argument('--max-power', type=int, default=1000, help='Maximum laser power (default: 1000)')
     parser.add_argument('--feedrate', type=int, default=1000, help='Feedrate for cutting (default: 1000)')
     parser.add_argument('--reposition', type=int, default=3000, help='Speed for repositioning moves (default: 3000)')
+    parser.add_argument('--no-optimize', action='store_true', help='Disable path optimization (default: optimization enabled)')
     
     args = parser.parse_args()
     
@@ -178,11 +274,13 @@ def main():
         min_power=args.min_power,
         max_power=args.max_power,
         feedrate=args.feedrate,
-        reposition_speed=args.reposition
+        reposition_speed=args.reposition,
+        optimize=not args.no_optimize
     )
     
     print(f"Converted {args.svg_file} to {args.output}")
     print(f"Settings: min_power={args.min_power}, max_power={args.max_power}, feedrate={args.feedrate}")
+    print(f"Path optimization: {'disabled' if args.no_optimize else 'enabled'}")
 
 if __name__ == "__main__":
     main()
