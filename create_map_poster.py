@@ -214,7 +214,7 @@ def get_coordinates(city, country):
     else:
         raise ValueError(f"Could not find coordinates for {city}, {country}")
 
-def create_poster(city, country, point, dist, output_file, output_format):
+def create_poster(city, country, point, dist, output_file, output_format, svg_size_mm=None):
     print(f"\nGenerating map for {city}, {country}...")
     
     # Progress bar for data fetching
@@ -246,7 +246,54 @@ def create_poster(city, country, point, dist, output_file, output_format):
     
     # 2. Setup Plot
     print("Rendering map...")
-    fig, ax = plt.subplots(figsize=(12, 16), facecolor=THEME['bg'])
+    
+    # Handle SVG sizing if specified
+    if output_format.lower() == 'svg' and svg_size_mm:
+        # Convert mm to inches (1 inch = 25.4 mm)
+        size_inches = svg_size_mm / 25.4
+        
+        # Create a temporary figure to determine aspect ratio
+        temp_fig, temp_ax = plt.subplots(figsize=(12, 16), facecolor=THEME['bg'])
+        temp_ax.set_facecolor(THEME['bg'])
+        temp_ax.set_position([0, 0, 1, 1])
+        
+        # Plot the map content to determine aspect ratio
+        if water is not None and not water.empty:
+            water_polys = water[water.geometry.type.isin(['Polygon', 'MultiPolygon'])]
+            if not water_polys.empty:
+                water_polys.plot(ax=temp_ax, facecolor=THEME['water'], edgecolor='none', zorder=1)
+        
+        if parks is not None and not parks.empty:
+            parks_polys = parks[parks.geometry.type.isin(['Polygon', 'MultiPolygon'])]
+            if not parks_polys.empty:
+                parks_polys.plot(ax=temp_ax, facecolor=THEME['parks'], edgecolor='none', zorder=2)
+        
+        edge_colors = get_edge_colors_by_type(G)
+        edge_widths = get_edge_widths_by_type(G)
+        ox.plot_graph(G, ax=temp_ax, bgcolor=THEME['bg'], node_size=0, edge_color=edge_colors, edge_linewidth=edge_widths, show=False, close=False)
+        
+        # Get the current figure size and aspect ratio
+        temp_fig.canvas.draw()
+        bbox = temp_ax.get_window_extent().transformed(temp_fig.dpi_scale_trans.inverted())
+        width_inches, height_inches = bbox.width, bbox.height
+        aspect_ratio = width_inches / height_inches
+        
+        plt.close(temp_fig)
+        
+        # Calculate new figure size based on aspect ratio
+        if aspect_ratio >= 1:
+            # Width is the longest edge
+            new_width = size_inches
+            new_height = size_inches / aspect_ratio
+        else:
+            # Height is the longest edge
+            new_height = size_inches
+            new_width = size_inches * aspect_ratio
+            
+        fig, ax = plt.subplots(figsize=(new_width, new_height), facecolor=THEME['bg'])
+    else:
+        fig, ax = plt.subplots(figsize=(12, 16), facecolor=THEME['bg'])
+    
     ax.set_facecolor(THEME['bg'])
     ax.set_position([0, 0, 1, 1])
     
@@ -455,6 +502,7 @@ Examples:
     parser.add_argument('--distance', '-d', type=int, default=29000, help='Map radius in meters (default: 29000)')
     parser.add_argument('--list-themes', action='store_true', help='List all available themes')
     parser.add_argument('--format', '-f', default='png', choices=['png', 'svg', 'pdf'],help='Output format for the poster (default: png)')
+    parser.add_argument('--svg-size', type=int, help='Longest edge size in millimeters for SVG output (only used with --format svg)')
     
     args = parser.parse_args()
     
@@ -492,7 +540,7 @@ Examples:
     try:
         coords = get_coordinates(args.city, args.country)
         output_file = generate_output_filename(args.city, args.theme, args.format)
-        create_poster(args.city, args.country, coords, args.distance, output_file, args.format)
+        create_poster(args.city, args.country, coords, args.distance, output_file, args.format, args.svg_size)
         
         print("\n" + "=" * 50)
         print("✓ Poster generation complete!")
