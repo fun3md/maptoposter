@@ -351,8 +351,48 @@ def svg_to_gcode(svg_file, output_file, min_power=0, max_power=1000, feedrate=10
     
     # Parse SVG paths
     print(f"Parsing SVG paths...")
-    paths, attributes = svg2paths(svg_file)
-    print(f"Found {len(paths)} paths in SVG file")
+    try:
+        paths, attributes = svg2paths(svg_file)
+        print(f"Found {len(paths)} paths in SVG file")
+    except KeyError as e:
+        if str(e) == "'d'":
+            print(f"Error: SVG contains path elements without 'd' attribute. Processing only valid paths...")
+            # Use a more robust approach to extract paths with 'd' attributes
+            import xml.etree.ElementTree as ET
+            from svgpathtools import parse_path
+            
+            # Parse the SVG file
+            tree = ET.parse(svg_file)
+            root = tree.getroot()
+            
+            # Find all path elements with 'd' attribute
+            paths = []
+            attributes = []
+            
+            # Register namespaces
+            namespaces = {'svg': 'http://www.w3.org/2000/svg'}
+            
+            # Find all path elements
+            for path_elem in root.findall('.//svg:path', namespaces):
+                if 'd' in path_elem.attrib:
+                    # Parse the path
+                    path_data = path_elem.attrib['d']
+                    try:
+                        path = parse_path(path_data)
+                        paths.append(path)
+                        
+                        # Extract attributes
+                        attr = {}
+                        for key, value in path_elem.attrib.items():
+                            attr[key] = value
+                        attributes.append(attr)
+                    except Exception as parse_error:
+                        print(f"Warning: Could not parse path: {parse_error}")
+            
+            print(f"Found {len(paths)} valid paths with 'd' attribute")
+        else:
+            # Re-raise if it's a different KeyError
+            raise
     
     # Initialize statistics
     stats = {
@@ -507,9 +547,9 @@ def main():
     parser.add_argument('svg_file', help='Input SVG file')
     parser.add_argument('--output', '-o', help='Output G-code file (default: input file with .nc extension)')
     parser.add_argument('--min-power', type=int, default=0, help='Minimum laser power (default: 0)')
-    parser.add_argument('--max-power', type=int, default=1000, help='Maximum laser power (default: 1000)')
-    parser.add_argument('--feedrate', type=int, default=1000, help='Feedrate for cutting (default: 1000)')
-    parser.add_argument('--reposition', type=int, default=3000, help='Speed for repositioning moves (default: 3000)')
+    parser.add_argument('--max-power', type=int, default=70, help='Maximum laser power (default: 1000)')
+    parser.add_argument('--feedrate', type=int, default=8000, help='Feedrate for cutting (default: 1000)')
+    parser.add_argument('--reposition', type=int, default=10000, help='Speed for repositioning moves (default: 3000)')
     parser.add_argument('--no-optimize', action='store_true', help='Disable path optimization (default: optimization enabled)')
     parser.add_argument('--optimize-level', choices=['fast', 'balanced', 'thorough'], default='balanced',
                         help='Optimization level: fast (nearest-neighbor only), balanced (limited 2-opt), '
