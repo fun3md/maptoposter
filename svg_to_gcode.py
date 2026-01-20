@@ -334,7 +334,11 @@ def svg_to_gcode(svg_file, output_file, min_power=0, max_power=1000, feedrate=10
         optimize: Whether to optimize path order (default: True)
         optimization_level: 'fast', 'balanced', or 'thorough' (default: 'balanced')
     """
+    import datetime
+    import os
+    
     # Get SVG dimensions and viewBox
+    print(f"Reading SVG dimensions from {svg_file}...")
     width, height, viewbox = get_svg_dimensions(svg_file)
     
     if viewbox:
@@ -343,35 +347,81 @@ def svg_to_gcode(svg_file, output_file, min_power=0, max_power=1000, feedrate=10
         min_x, min_y = 0, 0
         vb_width, vb_height = width, height
     
+    print(f"SVG dimensions: {width}x{height}, ViewBox: {viewbox}")
+    
     # Parse SVG paths
+    print(f"Parsing SVG paths...")
     paths, attributes = svg2paths(svg_file)
+    print(f"Found {len(paths)} paths in SVG file")
+    
+    # Initialize statistics
+    stats = {
+        'total_paths': len(paths),
+        'processed_paths': 0,
+        'skipped_paths': 0,
+        'total_travel_distance': 0,
+        'total_cutting_distance': 0,
+        'start_time': datetime.datetime.now(),
+    }
     
     # Optimize path order if requested
     if optimize:
+        print(f"Optimizing path order using '{optimization_level}' strategy...")
         path_attr_pairs = optimize_path_order(paths, attributes, min_power, optimization_level)
     else:
+        print("Path optimization disabled, using original path order")
         path_attr_pairs = list(zip(paths, attributes))
     
+    # Count paths that will be processed (power > min_power)
+    valid_paths = 0
+    for _, attr in path_attr_pairs:
+        stroke = attr.get('stroke', '#000000') if attr else '#000000'
+        if stroke and stroke.lower() != 'none':
+            power = color_to_power(stroke, min_power, max_power)
+            if power > min_power:
+                valid_paths += 1
+    
+    stats['valid_paths'] = valid_paths
+    print(f"Processing {valid_paths} valid paths (with power > {min_power})")
+    
     # Open output file
+    print(f"Writing G-code to {output_file}...")
     with open(output_file, 'w') as f:
-        # Write G-code header
+        # Write G-code header with information
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        svg_filename = os.path.basename(svg_file)
+        
+        f.write("; G-code generated from SVG file\n")
+        f.write(f"; Source: {svg_filename}\n")
+        f.write(f"; Date: {timestamp}\n")
+        f.write(f"; Settings: min_power={min_power}, max_power={max_power}, feedrate={feedrate}, reposition_speed={reposition_speed}\n")
+        f.write(f"; Optimization: {'enabled (' + optimization_level + ')' if optimize else 'disabled'}\n")
+        f.write(f"; SVG dimensions: {width}x{height}, ViewBox: {viewbox}\n")
+        f.write(f"; Total paths: {stats['total_paths']}, Valid paths: {stats['valid_paths']}\n")
+        f.write("\n")
         f.write("G90 (use absolute coordinates)\n")
         f.write(f"G0 X0 Y0 S0\n")
         f.write(f"G1 M4 F{feedrate}\n")
         
         # Process each path in the optimized order
+        path_count = 0
+        previous_end_x = 0
+        previous_end_y = 0
+        
         for path, attr in path_attr_pairs:
             # Get path color and calculate laser power
             stroke = attr.get('stroke', '#000000') if attr else '#000000'
             
             # Skip paths with no stroke or 'none' stroke
             if not stroke or stroke.lower() == 'none':
+                stats['skipped_paths'] += 1
                 continue
                 
             power = color_to_power(stroke, min_power, max_power)
             
             # Skip paths with zero power
             if power <= min_power:
+                stats['skipped_paths'] += 1
                 continue
             
             # Get first point of path
@@ -379,27 +429,74 @@ def svg_to_gcode(svg_file, output_file, min_power=0, max_power=1000, feedrate=10
             start_x = start.real
             start_y = start.imag
             
+            # Update path counter
+            path_count += 1
+            stats['processed_paths'] += 1
+            
+            # Add informational comment about the current path
+            f.write(f"\n; Path {path_count}/{stats['valid_paths']} - Power: {power} ({int(power/max_power*100)}%)\n")
+            
+            # Calculate travel distance to this path
+            if path_count > 1:
+                # Calculate distance from last position to current start
+                last_pos = (previous_end_x, previous_end_y)
+                current_pos = (start_x, start_y)
+                travel_distance = calculate_distance(last_pos, current_pos)
+                stats['total_travel_distance'] += travel_distance
+                f.write(f"; Travel distance: {travel_distance:.2f} units\n")
+            
             # Move to start position with laser off
             f.write(f"G0 X{start_x:.4f} Y{start_y:.4f} S0 F{reposition_speed}\n")
             f.write(f"G1 F{feedrate}\n")
             f.write(f"M4\n")
+            
+            # Initialize path cutting distance
+            path_cutting_distance = 0
             
             # Process each segment in the path
             for segment in path:
                 if isinstance(segment, Line):
                     end_x = segment.end.real
                     end_y = segment.end.imag
+                    
+                    # Calculate segment length
+                    segment_length = calculate_distance((start_x, start_y), (end_x, end_y))
+                    path_cutting_distance += segment_length
+                    
                     f.write(f"G1 X{end_x:.4f} Y{end_y:.4f} S{power}\n")
+                    
+                    # Update start position for next segment
+                    start_x, start_y = end_x, end_y
                 
                 elif isinstance(segment, (CubicBezier, QuadraticBezier, Arc)):
                     # Approximate curves with line segments
                     points = segment.point(np.linspace(0, 1, 10))
+                    prev_x, prev_y = start_x, start_y
+                    
                     for point in points[1:]:  # Skip first point as it's the current position
                         x, y = point.real, point.imag
+                        
+                        # Calculate segment length
+                        segment_length = calculate_distance((prev_x, prev_y), (x, y))
+                        path_cutting_distance += segment_length
+                        
                         f.write(f"G1 X{x:.4f} Y{y:.4f} S{power}\n")
+                        
+                        # Update previous position
+                        prev_x, prev_y = x, y
+                    
+                    # Update start position for next segment
+                    start_x, start_y = prev_x, prev_y
+            
+            # Add cutting distance information
+            stats['total_cutting_distance'] += path_cutting_distance
+            f.write(f"; Cutting distance: {path_cutting_distance:.2f} units\n")
             
             # Turn off laser at end of path
             f.write(f"M5\n")
+            
+            # Store the end position of this path for calculating travel to next path
+            previous_end_x, previous_end_y = start_x, start_y
         
         # Write G-code footer
         f.write(f"M5 S{min_power} F{feedrate}\n")
