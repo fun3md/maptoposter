@@ -308,7 +308,8 @@ def create_poster(city, country, point, dist, output_file, output_format, svg_si
         
         # Create a clip path using the axis limits
         clip_rect = Rectangle((0, 0), 1, 1, transform=ax.transAxes)
-        ax.set_clip_path(clip_rect, transform=ax.transAxes)
+        # Set the transform on the rectangle itself, not in set_clip_path
+        ax.set_clip_path(clip_rect)
     
     # 3. Plot Layers
     # Layer 1: Polygons (filter to only plot polygon/multipolygon geometries, not points)
