@@ -6,6 +6,15 @@ This script converts SVG files to G-code for laser cutting machines.
 It extracts paths from the SVG, considers only the viewable area,
 maps SVG colors to laser power settings, and optimizes path order
 to minimize travel distances.
+
+Path Optimization Features:
+- Fast: Uses a greedy nearest-neighbor algorithm to find the next closest path
+- Balanced: Uses nearest-neighbor followed by limited 2-opt improvement (default)
+- Thorough: Uses nearest-neighbor followed by full 2-opt improvement until convergence
+
+The 2-opt algorithm significantly improves path optimization by repeatedly
+swapping path segments when it reduces the total travel distance, resulting
+in shorter cutting times and less machine wear.
 """
 
 import argparse
@@ -122,12 +131,63 @@ def calculate_distance(point1, point2):
     """Calculate Euclidean distance between two points"""
     return math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
 
-def optimize_path_order(paths, attributes, min_power):
+def optimize_path_order(paths, attributes, min_power, optimization_level='balanced'):
     """Optimize the order of paths to minimize travel distance
     
-    Uses a nearest-neighbor algorithm to find the next closest path
+    Uses a nearest-neighbor algorithm followed by 2-opt improvement
+    
+    Args:
+        paths: List of SVG paths
+        attributes: List of path attributes
+        min_power: Minimum laser power threshold
+        optimization_level: 'fast', 'balanced', or 'thorough'
+    
+    Returns:
+        List of (path, attribute) tuples in optimized order
     """
-    # Filter out paths with power <= min_power and prepare path data
+    # Step 1: Filter paths and prepare path data
+    path_data = prepare_path_data(paths, attributes, min_power)
+    
+    if not path_data:
+        return []
+    
+    # Step 2: Generate initial solution using nearest neighbor
+    print(f"Optimizing path order for {len(path_data)} paths...")
+    
+    # Get initial solution using nearest neighbor
+    optimized_indices = nearest_neighbor(path_data)
+    
+    # Calculate initial tour distance
+    initial_distance = calculate_tour_distance(path_data, optimized_indices)
+    print(f"Initial path length (nearest neighbor): {initial_distance:.2f} units")
+    
+    # Step 3: Improve solution using 2-opt if not using 'fast' optimization
+    if optimization_level != 'fast':
+        # Set iteration limits based on optimization level
+        if optimization_level == 'balanced':
+            max_iterations = min(1000, len(path_data) * 10)  # Reasonable limit for balanced mode
+        else:  # thorough
+            max_iterations = None  # No limit for thorough mode
+        
+        # Apply 2-opt improvement
+        optimized_indices = two_opt(path_data, optimized_indices, max_iterations)
+        
+        # Calculate improved distance
+        final_distance = calculate_tour_distance(path_data, optimized_indices)
+        improvement = (initial_distance - final_distance) / initial_distance * 100
+        print(f"Optimized path length (2-opt): {final_distance:.2f} units")
+        print(f"Improvement: {improvement:.2f}%")
+    
+    # Step 4: Convert indices back to path-attribute pairs
+    optimized_paths = [
+        (path_data[i]['path'], path_data[i]['attr'])
+        for i in optimized_indices
+    ]
+    
+    return optimized_paths
+
+def prepare_path_data(paths, attributes, min_power):
+    """Filter out paths with power <= min_power and prepare path data"""
     path_data = []
     for i, (path, attr) in enumerate(zip(paths, attributes)):
         # Get stroke color with fallback to black
@@ -147,39 +207,133 @@ def optimize_path_order(paths, attributes, min_power):
                 'path': path,
                 'attr': attr,
                 'start': start_point,
-                'end': end_point,
-                'visited': False
+                'end': end_point
             })
     
-    # Optimize path order
-    optimized_paths = []
-    current_point = (0, 0)  # Start from origin
+    return path_data
+
+def nearest_neighbor(path_data):
+    """Generate initial solution using nearest neighbor algorithm"""
+    n = len(path_data)
+    if n == 0:
+        return []
     
-    while path_data:
+    # Start from origin
+    current_point = (0, 0)
+    unvisited = list(range(n))
+    tour = []
+    
+    while unvisited:
         # Find the closest unvisited path
         closest_idx = -1
         min_distance = float('inf')
         
-        for i, data in enumerate(path_data):
+        for i in unvisited:
             # Calculate distance from current point to path start
-            distance = calculate_distance(current_point, data['start'])
+            distance = calculate_distance(current_point, path_data[i]['start'])
             
             if distance < min_distance:
                 min_distance = distance
                 closest_idx = i
         
-        # Add the closest path to the optimized list
-        next_path = path_data.pop(closest_idx)
-        optimized_paths.append((next_path['path'], next_path['attr']))
+        # Add the closest path to the tour
+        tour.append(closest_idx)
+        unvisited.remove(closest_idx)
         
         # Update current point to the end of the path we just processed
-        current_point = next_path['end']
+        current_point = path_data[closest_idx]['end']
     
-    return optimized_paths
+    return tour
 
-def svg_to_gcode(svg_file, output_file, min_power=0, max_power=1000, feedrate=1000, reposition_speed=3000, optimize=True):
-    """Convert SVG file to G-code for laser cutting"""
+def calculate_tour_distance(path_data, tour):
+    """Calculate the total distance of a tour"""
+    if not tour:
+        return 0
     
+    total_distance = 0
+    
+    # Distance from origin to first path
+    total_distance += calculate_distance((0, 0), path_data[tour[0]]['start'])
+    
+    # Distance between consecutive paths
+    for i in range(len(tour) - 1):
+        current_path = path_data[tour[i]]
+        next_path = path_data[tour[i + 1]]
+        total_distance += calculate_distance(current_path['end'], next_path['start'])
+    
+    return total_distance
+
+def two_opt(path_data, tour, max_iterations=None):
+    """Improve tour using 2-opt algorithm
+    
+    Args:
+        path_data: List of path data dictionaries
+        tour: Initial tour as a list of indices
+        max_iterations: Maximum number of iterations (None for unlimited)
+    
+    Returns:
+        Improved tour
+    """
+    n = len(tour)
+    if n <= 2:
+        return tour  # No improvement possible for 0, 1 or 2 paths
+    
+    # Calculate the total distance of the initial tour
+    best_distance = calculate_tour_distance(path_data, tour)
+    improvement = True
+    iteration = 0
+    
+    # Continue until no improvement is found or max iterations reached
+    while improvement and (max_iterations is None or iteration < max_iterations):
+        improvement = False
+        iteration += 1
+        
+        # Progress reporting for long-running optimizations
+        if iteration % 100 == 0:
+            print(f"2-opt iteration {iteration}, current distance: {best_distance:.2f}")
+        
+        # Try all possible 2-opt swaps
+        for i in range(n - 1):
+            # Use first improvement strategy for efficiency
+            for j in range(i + 2, n):
+                # Create new tour with 2-opt swap: reverse the segment between i and j
+                new_tour = tour.copy()
+                new_tour[i+1:j+1] = reversed(tour[i+1:j+1])
+                
+                # Calculate the distance of the new tour
+                new_distance = calculate_tour_distance(path_data, new_tour)
+                
+                # If the new tour is better, accept it
+                if new_distance < best_distance:
+                    tour = new_tour
+                    best_distance = new_distance
+                    improvement = True
+                    break  # Break inner loop to restart with the new tour
+            
+            if improvement:
+                break  # Break outer loop to restart with the new tour
+    
+    if max_iterations is not None and iteration >= max_iterations:
+        print(f"Reached maximum iterations ({max_iterations})")
+    else:
+        print(f"2-opt converged after {iteration} iterations")
+    
+    return tour
+
+def svg_to_gcode(svg_file, output_file, min_power=0, max_power=1000, feedrate=1000,
+                reposition_speed=3000, optimize=True, optimization_level='balanced'):
+    """Convert SVG file to G-code for laser cutting
+    
+    Args:
+        svg_file: Input SVG file path
+        output_file: Output G-code file path
+        min_power: Minimum laser power (default: 0)
+        max_power: Maximum laser power (default: 1000)
+        feedrate: Feedrate for cutting (default: 1000)
+        reposition_speed: Speed for repositioning moves (default: 3000)
+        optimize: Whether to optimize path order (default: True)
+        optimization_level: 'fast', 'balanced', or 'thorough' (default: 'balanced')
+    """
     # Get SVG dimensions and viewBox
     width, height, viewbox = get_svg_dimensions(svg_file)
     
@@ -194,7 +348,7 @@ def svg_to_gcode(svg_file, output_file, min_power=0, max_power=1000, feedrate=10
     
     # Optimize path order if requested
     if optimize:
-        path_attr_pairs = optimize_path_order(paths, attributes, min_power)
+        path_attr_pairs = optimize_path_order(paths, attributes, min_power, optimization_level)
     else:
         path_attr_pairs = list(zip(paths, attributes))
     
@@ -260,6 +414,9 @@ def main():
     parser.add_argument('--feedrate', type=int, default=1000, help='Feedrate for cutting (default: 1000)')
     parser.add_argument('--reposition', type=int, default=3000, help='Speed for repositioning moves (default: 3000)')
     parser.add_argument('--no-optimize', action='store_true', help='Disable path optimization (default: optimization enabled)')
+    parser.add_argument('--optimize-level', choices=['fast', 'balanced', 'thorough'], default='balanced',
+                        help='Optimization level: fast (nearest-neighbor only), balanced (limited 2-opt), '
+                             'or thorough (full 2-opt) (default: balanced)')
     
     args = parser.parse_args()
     
@@ -269,18 +426,23 @@ def main():
         args.output = f"{base_name}.nc"
     
     svg_to_gcode(
-        args.svg_file, 
-        args.output, 
+        args.svg_file,
+        args.output,
         min_power=args.min_power,
         max_power=args.max_power,
         feedrate=args.feedrate,
         reposition_speed=args.reposition,
-        optimize=not args.no_optimize
+        optimize=not args.no_optimize,
+        optimization_level=args.optimize_level
     )
     
     print(f"Converted {args.svg_file} to {args.output}")
     print(f"Settings: min_power={args.min_power}, max_power={args.max_power}, feedrate={args.feedrate}")
-    print(f"Path optimization: {'disabled' if args.no_optimize else 'enabled'}")
+    
+    if args.no_optimize:
+        print("Path optimization: disabled")
+    else:
+        print(f"Path optimization: enabled (level: {args.optimize_level})")
 
 if __name__ == "__main__":
     main()
