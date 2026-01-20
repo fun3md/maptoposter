@@ -297,6 +297,19 @@ def create_poster(city, country, point, dist, output_file, output_format, svg_si
     ax.set_facecolor(THEME['bg'])
     ax.set_position([0, 0, 1, 1])
     
+    # Set up clipping for SVG output to ensure elements don't extend beyond the poster dimensions
+    if output_format.lower() == 'svg':
+        # Create a clipping rectangle that matches the figure dimensions
+        from matplotlib.patches import Rectangle
+        
+        # Get the axis limits
+        ax.set_xlim(auto=True)
+        ax.set_ylim(auto=True)
+        
+        # Create a clip path using the axis limits
+        clip_rect = Rectangle((0, 0), 1, 1, transform=ax.transAxes)
+        ax.set_clip_path(clip_rect, transform=ax.transAxes)
+    
     # 3. Plot Layers
     # Layer 1: Polygons (filter to only plot polygon/multipolygon geometries, not points)
     if water is not None and not water.empty:
