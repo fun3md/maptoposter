@@ -299,17 +299,31 @@ def create_poster(city, country, point, dist, output_file, output_format, svg_si
     
     # Set up clipping for SVG output to ensure elements don't extend beyond the poster dimensions
     if output_format.lower() == 'svg':
-        # Create a clipping rectangle that matches the figure dimensions
+        # Import necessary modules
         from matplotlib.patches import Rectangle
+        import matplotlib.path as mpath
+        import matplotlib.transforms as mtransforms
         
-        # Get the axis limits
+        # First ensure axis limits are set
         ax.set_xlim(auto=True)
         ax.set_ylim(auto=True)
         
-        # Create a clip path using the axis limits
-        clip_rect = Rectangle((0, 0), 1, 1, transform=ax.transAxes)
-        # Set the transform on the rectangle itself, not in set_clip_path
-        ax.set_clip_path(clip_rect)
+        # Create a clipping boundary that matches the figure dimensions
+        # This uses figure coordinates to ensure everything is contained
+        fig_bbox = fig.bbox
+        transform = mtransforms.BboxTransformFrom(fig_bbox) + ax.transData.inverted()
+        
+        # Create a path that encompasses the entire figure area
+        clip_path = mpath.Path.unit_rectangle()
+        clip_patch = Rectangle((0, 0), 1, 1, transform=ax.transAxes,
+                              fill=False, edgecolor='none', visible=False)
+        
+        # Apply clipping to the axis
+        ax.set_clip_path(clip_path, transform=ax.transAxes)
+        
+        # Also apply clipping to all existing children of the axis
+        for child in ax.get_children():
+            child.set_clip_path(clip_path, transform=ax.transAxes)
     
     # 3. Plot Layers
     # Layer 1: Polygons (filter to only plot polygon/multipolygon geometries, not points)
@@ -404,7 +418,21 @@ def create_poster(city, country, point, dist, output_file, output_format, svg_si
     print(f"Saving to {output_file}...")
 
     fmt = output_format.lower()
-    save_kwargs = dict(facecolor=THEME["bg"], bbox_inches="tight", pad_inches=0.05,)
+    save_kwargs = dict(facecolor=THEME["bg"], bbox_inches="tight", pad_inches=0.05)
+    
+    # For SVG output, ensure all elements respect the clipping path
+    if fmt == "svg":
+        # Import matplotlib.path if not already imported
+        import matplotlib.path as mpath
+        
+        # Apply clipping to any elements that might have been added after initial setup
+        # Use the same clip path and transform that we defined earlier
+        clip_path = mpath.Path.unit_rectangle()
+        transform = ax.transAxes
+        
+        for child in ax.get_children():
+            if not child.get_clip_path():
+                child.set_clip_path(clip_path, transform=transform)
 
     # DPI matters mainly for raster formats
     if fmt == "png":
