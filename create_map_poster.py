@@ -10,374 +10,311 @@ import json
 import os
 from datetime import datetime
 import argparse
+import geopandas as gpd
+from shapely.geometry import box
 
 THEMES_DIR = "themes"
 FONTS_DIR = "fonts"
 POSTERS_DIR = "posters"
 
 def load_fonts():
-    """
-    Load Roboto fonts from the fonts directory.
-    Returns dict with font paths for different weights.
-    """
+    """Load Roboto fonts from the fonts directory."""
     fonts = {
         'bold': os.path.join(FONTS_DIR, 'Roboto-Bold.ttf'),
         'regular': os.path.join(FONTS_DIR, 'Roboto-Regular.ttf'),
         'light': os.path.join(FONTS_DIR, 'Roboto-Light.ttf')
     }
-    
-    # Verify fonts exist
     for weight, path in fonts.items():
         if not os.path.exists(path):
-            print(f"⚠ Font not found: {path}")
+            print(f"[WARNING] Font not found: {path}")
             return None
-    
     return fonts
 
 FONTS = load_fonts()
 
-def generate_output_filename(city, theme_name, output_format):
-    """
-    Generate unique output filename with city, theme, and datetime.
-    """
+def generate_output_filename(city, theme_name, output_format, ratio_str):
+    """Generate unique output filename."""
     if not os.path.exists(POSTERS_DIR):
         os.makedirs(POSTERS_DIR)
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     city_slug = city.lower().replace(' ', '_')
+    ratio_slug = ratio_str.replace(':', '-')
     ext = output_format.lower()
-    filename = f"{city_slug}_{theme_name}_{timestamp}.{ext}"
+    filename = f"{city_slug}_{theme_name}_{ratio_slug}_{timestamp}.{ext}"
     return os.path.join(POSTERS_DIR, filename)
 
 def get_available_themes():
-    """
-    Scans the themes directory and returns a list of available theme names.
-    """
     if not os.path.exists(THEMES_DIR):
         os.makedirs(THEMES_DIR)
         return []
-    
     themes = []
     for file in sorted(os.listdir(THEMES_DIR)):
         if file.endswith('.json'):
-            theme_name = file[:-5]  # Remove .json extension
-            themes.append(theme_name)
+            themes.append(file[:-5])
     return themes
 
 def load_theme(theme_name="feature_based"):
-    """
-    Load theme from JSON file in themes directory.
-    """
     theme_file = os.path.join(THEMES_DIR, f"{theme_name}.json")
-    
     if not os.path.exists(theme_file):
-        print(f"⚠ Theme file '{theme_file}' not found. Using default feature_based theme.")
-        # Fallback to embedded default theme
         return {
             "name": "Feature-Based Shading",
-            "bg": "#FFFFFF",
-            "text": "#000000",
-            "gradient_color": "#FFFFFF",
-            "water": "#C0C0C0",
-            "parks": "#F0F0F0",
-            "road_motorway": "#0A0A0A",
-            "road_primary": "#1A1A1A",
-            "road_secondary": "#2A2A2A",
-            "road_tertiary": "#3A3A3A",
-            "road_residential": "#4A4A4A",
-            "road_default": "#3A3A3A"
+            "bg": "#FFFFFF", "text": "#000000", "gradient_color": "#FFFFFF",
+            "water": "#C0C0C0", "parks": "#F0F0F0",
+            "road_motorway": "#0A0A0A", "road_primary": "#1A1A1A",
+            "road_secondary": "#2A2A2A", "road_tertiary": "#3A3A3A",
+            "road_residential": "#4A4A4A", "road_default": "#3A3A3A"
         }
-    
     with open(theme_file, 'r') as f:
-        theme = json.load(f)
-        print(f"✓ Loaded theme: {theme.get('name', theme_name)}")
-        if 'description' in theme:
-            print(f"  {theme['description']}")
-        return theme
+        return json.load(f)
 
-# Load theme (can be changed via command line or input)
-THEME = None  # Will be loaded later
+THEME = None
 
 def create_gradient_fade(ax, color, location='bottom', zorder=10):
-    """
-    Creates a fade effect at the top or bottom of the map.
-    """
     vals = np.linspace(0, 1, 256).reshape(-1, 1)
     gradient = np.hstack((vals, vals))
-    
     rgb = mcolors.to_rgb(color)
     my_colors = np.zeros((256, 4))
-    my_colors[:, 0] = rgb[0]
-    my_colors[:, 1] = rgb[1]
-    my_colors[:, 2] = rgb[2]
+    my_colors[:, :3] = rgb
     
     if location == 'bottom':
         my_colors[:, 3] = np.linspace(1, 0, 256)
-        extent_y_start = 0
-        extent_y_end = 0.25
+        extent_y_start, extent_y_end = 0, 0.25
     else:
         my_colors[:, 3] = np.linspace(0, 1, 256)
-        extent_y_start = 0.75
-        extent_y_end = 1.0
+        extent_y_start, extent_y_end = 0.75, 1.0
 
     custom_cmap = mcolors.ListedColormap(my_colors)
-    
-    xlim = ax.get_xlim()
-    ylim = ax.get_ylim()
+    xlim, ylim = ax.get_xlim(), ax.get_ylim()
     y_range = ylim[1] - ylim[0]
-    
     y_bottom = ylim[0] + y_range * extent_y_start
     y_top = ylim[0] + y_range * extent_y_end
     
     ax.imshow(gradient, extent=[xlim[0], xlim[1], y_bottom, y_top], 
               aspect='auto', cmap=custom_cmap, zorder=zorder, origin='lower')
 
-def get_edge_colors_by_type(G):
+def get_attributes_from_gdf(gdf):
     """
-    Assigns colors to edges based on road type hierarchy.
-    Returns a list of colors corresponding to each edge in the graph.
+    Extracts colors and widths directly from a GeoDataFrame based on highway tags.
     """
-    edge_colors = []
+    colors = []
+    widths = []
     
-    for u, v, data in G.edges(data=True):
-        # Get the highway type (can be a list or string)
-        highway = data.get('highway', 'unclassified')
+    # Iterate over the rows of the GeoDataFrame
+    for _, row in gdf.iterrows():
+        highway = row.get('highway', 'unclassified')
+        if isinstance(highway, list): highway = highway[0] if highway else 'unclassified'
         
-        # Handle list of highway types (take the first one)
-        if isinstance(highway, list):
-            highway = highway[0] if highway else 'unclassified'
-        
-        # Assign color based on road type
-        if highway in ['motorway', 'motorway_link']:
-            color = THEME['road_motorway']
-        elif highway in ['trunk', 'trunk_link', 'primary', 'primary_link']:
-            color = THEME['road_primary']
-        elif highway in ['secondary', 'secondary_link']:
-            color = THEME['road_secondary']
-        elif highway in ['tertiary', 'tertiary_link']:
-            color = THEME['road_tertiary']
-        elif highway in ['residential', 'living_street', 'unclassified']:
-            color = THEME['road_residential']
-        else:
-            color = THEME['road_default']
-        
-        edge_colors.append(color)
-    
-    return edge_colors
+        # Color Logic
+        if highway in ['motorway', 'motorway_link']: color = THEME['road_motorway']
+        elif highway in ['trunk', 'trunk_link', 'primary', 'primary_link']: color = THEME['road_primary']
+        elif highway in ['secondary', 'secondary_link']: color = THEME['road_secondary']
+        elif highway in ['tertiary', 'tertiary_link']: color = THEME['road_tertiary']
+        elif highway in ['residential', 'living_street', 'unclassified']: color = THEME['road_residential']
+        else: color = THEME['road_default']
+        colors.append(color)
 
-def get_edge_widths_by_type(G):
-    """
-    Assigns line widths to edges based on road type.
-    Major roads get thicker lines.
-    """
-    edge_widths = []
-    
-    for u, v, data in G.edges(data=True):
-        highway = data.get('highway', 'unclassified')
+        # Width Logic
+        if highway in ['motorway', 'motorway_link']: width = 1.2
+        elif highway in ['trunk', 'trunk_link', 'primary', 'primary_link']: width = 1.0
+        elif highway in ['secondary', 'secondary_link']: width = 0.8
+        elif highway in ['tertiary', 'tertiary_link']: width = 0.6
+        else: width = 0.4
+        widths.append(width)
         
-        if isinstance(highway, list):
-            highway = highway[0] if highway else 'unclassified'
-        
-        # Assign width based on road importance
-        if highway in ['motorway', 'motorway_link']:
-            width = 1.2
-        elif highway in ['trunk', 'trunk_link', 'primary', 'primary_link']:
-            width = 1.0
-        elif highway in ['secondary', 'secondary_link']:
-            width = 0.8
-        elif highway in ['tertiary', 'tertiary_link']:
-            width = 0.6
-        else:
-            width = 0.4
-        
-        edge_widths.append(width)
-    
-    return edge_widths
+    return colors, widths
 
-def get_coordinates(city, country):
-    """
-    Fetches coordinates for a given city and country using geopy.
-    Includes rate limiting to be respectful to the geocoding service.
-    """
-    print("Looking up coordinates...")
-    geolocator = Nominatim(user_agent="city_map_poster")
-    
-    # Add a small delay to respect Nominatim's usage policy
+def get_coordinates(city, country, max_retries=3):
+    geolocator = Nominatim(user_agent="city_map_poster", timeout=10)
     time.sleep(1)
+    query = f"{city}, {country}"
+    for attempt in range(max_retries):
+        try:
+            print(f"  Looking up location (Attempt {attempt+1})...")
+            location = geolocator.geocode(query)
+            if location:
+                print(f"[OK] {location.address}\n[OK] {location.latitude}, {location.longitude}")
+                return (location.latitude, location.longitude)
+            time.sleep(2**attempt)
+        except Exception as e:
+            print(f"  Error: {e}")
+            time.sleep(2**attempt)
     
-    location = geolocator.geocode(f"{city}, {country}")
-    
-    if location:
-        print(f"✓ Found: {location.address}")
-        print(f"✓ Coordinates: {location.latitude}, {location.longitude}")
-        return (location.latitude, location.longitude)
-    else:
-        raise ValueError(f"Could not find coordinates for {city}, {country}")
+    print("Geocoding failed.")
+    manual = input("Enter coordinates (lat,lon): ").strip()
+    if manual:
+        try: return tuple(map(float, manual.split(',')))
+        except: pass
+    return None
 
-def create_poster(city, country, point, dist, output_file, output_format, svg_size_mm=None):
+def create_poster(city, country, point, dist, output_file, output_format, ratio_str, svg_size_mm=None):
     print(f"\nGenerating map for {city}, {country}...")
+    plt.rcParams['svg.fonttype'] = 'none'
+
+    # --- 1. CALCULATE DIMENSIONS ---
+    # Parse Ratio
+    try:
+        w_ratio, h_ratio = map(float, ratio_str.split(':'))
+        target_aspect = w_ratio / h_ratio
+    except ValueError:
+        print("Invalid ratio format. Using 2:3")
+        target_aspect = 2/3
+
+    # Calculate Viewport in Meters based on 'dist' (Shortest Edge Logic)
+    if target_aspect < 1:
+        view_width_m = dist * 2
+        view_height_m = view_width_m / target_aspect
+    else:
+        view_height_m = dist * 2
+        view_width_m = view_height_m * target_aspect
     
-    # Progress bar for data fetching
+    print(f"[DEBUG] Viewport Geometry: {view_width_m:.0f}m (W) x {view_height_m:.0f}m (H)")
+
+    # Calculate Fetch Distance (Bleed) - 10% buffer
+    longest_edge_m = max(view_width_m, view_height_m)
+    fetch_dist = (longest_edge_m / 2) * 1.1
+    
+    print(f"[DEBUG] Download Radius: {fetch_dist:.0f}m")
+
+    # --- 2. DOWNLOAD DATA ---
     with tqdm(total=3, desc="Fetching map data", unit="step", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt}') as pbar:
-        # 1. Fetch Street Network
         pbar.set_description("Downloading street network")
-        G = ox.graph_from_point(point, dist=dist, dist_type='bbox', network_type='all')
-        pbar.update(1)
-        time.sleep(0.5)  # Rate limit between requests
+        G = ox.graph_from_point(point, dist=fetch_dist, dist_type='bbox', network_type='all')
+        G = ox.project_graph(G) # Projects to UTM (Meters)
         
-        # 2. Fetch Water Features
+        # Convert Graph to GeoDataFrames immediately for clipping
+        # We only need edges for the map, nodes are implicitly handled
+        _, edges = ox.graph_to_gdfs(G)
+        
+        pbar.update(1)
+        time.sleep(0.5) 
+        
         pbar.set_description("Downloading water features")
         try:
-            water = ox.features_from_point(point, tags={'natural': 'water', 'waterway': 'riverbank'}, dist=dist)
-        except:
-            water = None
+            water = ox.features_from_point(point, tags={'natural': 'water', 'waterway': 'riverbank'}, dist=fetch_dist)
+            if water is not None and not water.empty: water = water.to_crs(G.graph['crs'])
+        except: water = None
         pbar.update(1)
         time.sleep(0.3)
         
-        # 3. Fetch Parks
-        pbar.set_description("Downloading parks/green spaces")
+        pbar.set_description("Downloading parks")
         try:
-            parks = ox.features_from_point(point, tags={'leisure': 'park', 'landuse': 'grass'}, dist=dist)
-        except:
-            parks = None
+            parks = ox.features_from_point(point, tags={'leisure': 'park', 'landuse': 'grass'}, dist=fetch_dist)
+            if parks is not None and not parks.empty: parks = parks.to_crs(G.graph['crs'])
+        except: parks = None
         pbar.update(1)
+
+    # --- 3. DESTRUCTIVE CLIPPING ---
+    print("Performing destructive clipping...")
     
-    print("✓ All data downloaded successfully!")
+    # Calculate Center Point (using the fetched graph's bounds to align perfectly)
+    # Note: We use the *projected* coordinates from the graph
+    minx, miny, maxx, maxy = edges.total_bounds
+    x_center = (minx + maxx) / 2
+    y_center = (miny + maxy) / 2
+
+    # Create the Bounding Box Polygon (The "Cookie Cutter")
+    west = x_center - (view_width_m / 2)
+    east = x_center + (view_width_m / 2)
+    south = y_center - (view_height_m / 2)
+    north = y_center + (view_height_m / 2)
     
-    # 2. Setup Plot
-    print("Rendering map...")
+    clip_box = box(west, south, east, north)
     
-    # Handle SVG sizing if specified
-    if output_format.lower() == 'svg' and svg_size_mm:
-        # Convert mm to inches (1 inch = 25.4 mm)
-        size_inches = svg_size_mm / 25.4
-        
-        # Create a temporary figure to determine aspect ratio
-        temp_fig, temp_ax = plt.subplots(figsize=(12, 16), facecolor=THEME['bg'])
-        temp_ax.set_facecolor(THEME['bg'])
-        temp_ax.set_position([0, 0, 1, 1])
-        
-        # Plot the map content to determine aspect ratio
-        if water is not None and not water.empty:
-            water_polys = water[water.geometry.type.isin(['Polygon', 'MultiPolygon'])]
-            if not water_polys.empty:
-                water_polys.plot(ax=temp_ax, facecolor=THEME['water'], edgecolor='none', zorder=1)
-        
-        if parks is not None and not parks.empty:
-            parks_polys = parks[parks.geometry.type.isin(['Polygon', 'MultiPolygon'])]
-            if not parks_polys.empty:
-                parks_polys.plot(ax=temp_ax, facecolor=THEME['parks'], edgecolor='none', zorder=2)
-        
-        edge_colors = get_edge_colors_by_type(G)
-        edge_widths = get_edge_widths_by_type(G)
-        ox.plot_graph(G, ax=temp_ax, bgcolor=THEME['bg'], node_size=0, edge_color=edge_colors, edge_linewidth=edge_widths, show=False, close=False)
-        
-        # Get the current figure size and aspect ratio
-        temp_fig.canvas.draw()
-        bbox = temp_ax.get_window_extent().transformed(temp_fig.dpi_scale_trans.inverted())
-        width_inches, height_inches = bbox.width, bbox.height
-        aspect_ratio = width_inches / height_inches
-        
-        plt.close(temp_fig)
-        
-        # Calculate new figure size based on aspect ratio
-        if aspect_ratio >= 1:
-            # Width is the longest edge
-            new_width = size_inches
-            new_height = size_inches / aspect_ratio
-        else:
-            # Height is the longest edge
-            new_height = size_inches
-            new_width = size_inches * aspect_ratio
-            
-        fig, ax = plt.subplots(figsize=(new_width, new_height), facecolor=THEME['bg'])
-    else:
-        fig, ax = plt.subplots(figsize=(12, 16), facecolor=THEME['bg'])
+    # Clip Roads (Edges)
+    # gpd.clip intersects the geometries with the box. Lines crossing the border are cut.
+    clipped_edges = gpd.clip(edges, clip_box)
     
-    ax.set_facecolor(THEME['bg'])
-    ax.set_position([0, 0, 1, 1])
-    
-    # Set up clipping for SVG output to ensure elements don't extend beyond the poster dimensions
-    if output_format.lower() == 'svg':
-        # Import necessary modules
-        from matplotlib.patches import Rectangle
-        import matplotlib.path as mpath
-        import matplotlib.transforms as mtransforms
-        
-        # First ensure axis limits are set
-        ax.set_xlim(auto=True)
-        ax.set_ylim(auto=True)
-        
-        # Create a clipping boundary that matches the figure dimensions
-        # This uses figure coordinates to ensure everything is contained
-        fig_bbox = fig.bbox
-        transform = mtransforms.BboxTransformFrom(fig_bbox) + ax.transData.inverted()
-        
-        # Create a path that encompasses the entire figure area
-        clip_path = mpath.Path.unit_rectangle()
-        clip_patch = Rectangle((0, 0), 1, 1, transform=ax.transAxes,
-                              fill=False, edgecolor='none', visible=False)
-        
-        # Apply clipping to the axis
-        ax.set_clip_path(clip_path, transform=ax.transAxes)
-        
-        # Also apply clipping to all existing children of the axis
-        for child in ax.get_children():
-            child.set_clip_path(clip_path, transform=ax.transAxes)
-    
-    # 3. Plot Layers
-    # Layer 1: Polygons (filter to only plot polygon/multipolygon geometries, not points)
+    # Clip Water
     if water is not None and not water.empty:
-        # Filter to only polygon/multipolygon geometries to avoid point features showing as dots
-        water_polys = water[water.geometry.type.isin(['Polygon', 'MultiPolygon'])]
-        if not water_polys.empty:
-            water_polys.plot(ax=ax, facecolor=THEME['water'], edgecolor='none', zorder=1)
-    
+        clipped_water = gpd.clip(water, clip_box)
+        # Filter out empty geometries or points if any resulted from clip
+        clipped_water = clipped_water[clipped_water.geometry.type.isin(['Polygon', 'MultiPolygon'])]
+    else:
+        clipped_water = None
+
+    # Clip Parks
     if parks is not None and not parks.empty:
-        # Filter to only polygon/multipolygon geometries to avoid point features showing as dots
-        parks_polys = parks[parks.geometry.type.isin(['Polygon', 'MultiPolygon'])]
-        if not parks_polys.empty:
-            parks_polys.plot(ax=ax, facecolor=THEME['parks'], edgecolor='none', zorder=2)
+        clipped_parks = gpd.clip(parks, clip_box)
+        clipped_parks = clipped_parks[clipped_parks.geometry.type.isin(['Polygon', 'MultiPolygon'])]
+    else:
+        clipped_parks = None
+
+    print(f"[DEBUG] Clipped Edges: {len(edges)} -> {len(clipped_edges)}")
+
+    # --- 4. SETUP FIGURE ---
+    if svg_size_mm:
+        longest_edge_inch = svg_size_mm / 25.4
+    else:
+        longest_edge_inch = 24
     
-    # Layer 2: Roads with hierarchy coloring
-    print("Applying road hierarchy colors...")
-    edge_colors = get_edge_colors_by_type(G)
-    edge_widths = get_edge_widths_by_type(G)
+    if target_aspect < 1: # Portrait
+        height_inch = longest_edge_inch
+        width_inch = height_inch * target_aspect
+    else: # Landscape
+        width_inch = longest_edge_inch
+        height_inch = width_inch / target_aspect
+
+    if output_format.lower() == 'svg':
+        fig, ax = plt.subplots(figsize=(width_inch, height_inch), facecolor=THEME['bg'])
+    else:
+        fig, ax = plt.subplots(figsize=(width_inch, height_inch), facecolor=THEME['bg'])
     
-    ox.plot_graph(
-        G, ax=ax, bgcolor=THEME['bg'],
-        node_size=0,
-        edge_color=edge_colors,
-        edge_linewidth=edge_widths,
-        show=False, close=False
-    )
+    fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+    ax.set_facecolor(THEME['bg'])
     
-    # Layer 3: Gradients (Top and Bottom)
-    create_gradient_fade(ax, THEME['gradient_color'], location='bottom', zorder=10)
-    create_gradient_fade(ax, THEME['gradient_color'], location='top', zorder=10)
+    # --- 5. PLOT LAYERS (Using Clipped Data) ---
     
-    # 4. Typography using Roboto font
+    # Plot Water
+    if clipped_water is not None and not clipped_water.empty:
+        clipped_water.plot(ax=ax, facecolor=THEME['water'], edgecolor='none', zorder=1)
+    
+    # Plot Parks
+    if clipped_parks is not None and not clipped_parks.empty:
+        clipped_parks.plot(ax=ax, facecolor=THEME['parks'], edgecolor='none', zorder=2)
+    
+    # Plot Roads
+    if not clipped_edges.empty:
+        # We need to recalculate colors/widths because the indices might have changed 
+        # or we are using a pure GDF now, not a Graph object.
+        c_colors, c_widths = get_attributes_from_gdf(clipped_edges)
+        
+        clipped_edges.plot(
+            ax=ax, 
+            color=c_colors, 
+            linewidth=c_widths, 
+            zorder=3
+        )
+    
+    # --- 6. SET VIEWPORT (Strict Alignment) ---
+    # Even though we clipped the data, we still set the limits to ensure 
+    # the canvas matches the bounding box exactly (no whitespace drift).
+    ax.set_xlim(west, east)
+    ax.set_ylim(south, north)
+    ax.set_aspect('equal')
+    ax.axis('off')
+    
+    create_gradient_fade(ax, THEME['gradient_color'], location='bottom')
+    create_gradient_fade(ax, THEME['gradient_color'], location='top')
+    
+    # --- 7. TYPOGRAPHY ---
     if FONTS:
         font_main = FontProperties(fname=FONTS['bold'], size=60)
-        font_top = FontProperties(fname=FONTS['bold'], size=40)
-        font_sub = FontProperties(fname=FONTS['light'], size=22)
-        font_coords = FontProperties(fname=FONTS['regular'], size=14)
+        font_sub = FontProperties(fname=FONTS['light'], size=18)
+        font_coords = FontProperties(fname=FONTS['regular'], size=12)
+        font_attr = FontProperties(fname=FONTS['light'], size=8)
     else:
-        # Fallback to system fonts
         font_main = FontProperties(family='monospace', weight='bold', size=60)
-        font_top = FontProperties(family='monospace', weight='bold', size=40)
-        font_sub = FontProperties(family='monospace', weight='normal', size=22)
-        font_coords = FontProperties(family='monospace', size=14)
+        font_sub = FontProperties(family='monospace', weight='normal', size=18)
+        font_coords = FontProperties(family='monospace', size=12)
+        font_attr = FontProperties(family='monospace', size=8)
     
-    spaced_city = "  ".join(list(city.upper()))
-    
-    # Dynamically adjust font size based on city name length to prevent truncation
     base_font_size = 60
-    city_char_count = len(city)
-    if city_char_count > 10:
-        # Scale down font size for longer names
-        scale_factor = 10 / city_char_count
-        adjusted_font_size = max(base_font_size * scale_factor, 24)  # Minimum size of 24
+    safe_char_limit = 7
+    
+    if len(city) > safe_char_limit:
+        scale_factor = safe_char_limit / len(city)
+        adjusted_font_size = max(base_font_size * scale_factor, 20)
     else:
         adjusted_font_size = base_font_size
     
@@ -386,7 +323,8 @@ def create_poster(city, country, point, dist, output_file, output_format, svg_si
     else:
         font_main_adjusted = FontProperties(family='monospace', weight='bold', size=adjusted_font_size)
 
-    # --- BOTTOM TEXT ---
+    spaced_city = "  ".join(list(city.upper()))
+    
     ax.text(0.5, 0.14, spaced_city, transform=ax.transAxes,
             color=THEME['text'], ha='center', fontproperties=font_main_adjusted, zorder=11)
     
@@ -395,8 +333,7 @@ def create_poster(city, country, point, dist, output_file, output_format, svg_si
     
     lat, lon = point
     coords = f"{lat:.4f}° N / {lon:.4f}° E" if lat >= 0 else f"{abs(lat):.4f}° S / {lon:.4f}° E"
-    if lon < 0:
-        coords = coords.replace("E", "W")
+    if lon < 0: coords = coords.replace("E", "W")
     
     ax.text(0.5, 0.07, coords, transform=ax.transAxes,
             color=THEME['text'], alpha=0.7, ha='center', fontproperties=font_coords, zorder=11)
@@ -404,192 +341,53 @@ def create_poster(city, country, point, dist, output_file, output_format, svg_si
     ax.plot([0.4, 0.6], [0.125, 0.125], transform=ax.transAxes, 
             color=THEME['text'], linewidth=1, zorder=11)
 
-    # --- ATTRIBUTION (bottom right) ---
-    if FONTS:
-        font_attr = FontProperties(fname=FONTS['light'], size=8)
-    else:
-        font_attr = FontProperties(family='monospace', size=8)
-    
-    ax.text(0.98, 0.02, "© OpenStreetMap contributors", transform=ax.transAxes,
-            color=THEME['text'], alpha=0.5, ha='right', va='bottom', 
-            fontproperties=font_attr, zorder=11)
+    #ax.text(0.98, 0.02, "© OpenStreetMap contributors", transform=ax.transAxes,
+    #        color=THEME['text'], alpha=0.5, ha='right', va='bottom', 
+    #        fontproperties=font_attr, zorder=11)
 
-    # 5. Save
+    # --- 8. SAVE ---
     print(f"Saving to {output_file}...")
-
     fmt = output_format.lower()
-    save_kwargs = dict(facecolor=THEME["bg"], bbox_inches="tight", pad_inches=0.05)
     
-    # For SVG output, ensure all elements respect the clipping path
     if fmt == "svg":
-        # Import matplotlib.path if not already imported
-        import matplotlib.path as mpath
-        
-        # Apply clipping to any elements that might have been added after initial setup
-        # Use the same clip path and transform that we defined earlier
-        clip_path = mpath.Path.unit_rectangle()
-        transform = ax.transAxes
-        
-        for child in ax.get_children():
-            if not child.get_clip_path():
-                child.set_clip_path(clip_path, transform=transform)
-
-    # DPI matters mainly for raster formats
-    if fmt == "png":
-        save_kwargs["dpi"] = 300
-
-    plt.savefig(output_file, format=fmt, **save_kwargs)
+        plt.savefig(output_file, format=fmt, facecolor=THEME["bg"], bbox_inches=None, pad_inches=0)
+    else:
+        plt.savefig(output_file, format=fmt, facecolor=THEME["bg"], bbox_inches="tight", pad_inches=0, dpi=300)
 
     plt.close()
-    print(f"✓ Done! Poster saved as {output_file}")
-
-
-def print_examples():
-    """Print usage examples."""
-    print("""
-City Map Poster Generator
-=========================
-
-Usage:
-  python create_map_poster.py --city <city> --country <country> [options]
-
-Examples:
-  # Iconic grid patterns
-  python create_map_poster.py -c "New York" -C "USA" -t noir -d 12000           # Manhattan grid
-  python create_map_poster.py -c "Barcelona" -C "Spain" -t warm_beige -d 8000   # Eixample district grid
-  
-  # Waterfront & canals
-  python create_map_poster.py -c "Venice" -C "Italy" -t blueprint -d 4000       # Canal network
-  python create_map_poster.py -c "Amsterdam" -C "Netherlands" -t ocean -d 6000  # Concentric canals
-  python create_map_poster.py -c "Dubai" -C "UAE" -t midnight_blue -d 15000     # Palm & coastline
-  
-  # Radial patterns
-  python create_map_poster.py -c "Paris" -C "France" -t pastel_dream -d 10000   # Haussmann boulevards
-  python create_map_poster.py -c "Moscow" -C "Russia" -t noir -d 12000          # Ring roads
-  
-  # Organic old cities
-  python create_map_poster.py -c "Tokyo" -C "Japan" -t japanese_ink -d 15000    # Dense organic streets
-  python create_map_poster.py -c "Marrakech" -C "Morocco" -t terracotta -d 5000 # Medina maze
-  python create_map_poster.py -c "Rome" -C "Italy" -t warm_beige -d 8000        # Ancient street layout
-  
-  # Coastal cities
-  python create_map_poster.py -c "San Francisco" -C "USA" -t sunset -d 10000    # Peninsula grid
-  python create_map_poster.py -c "Sydney" -C "Australia" -t ocean -d 12000      # Harbor city
-  python create_map_poster.py -c "Mumbai" -C "India" -t contrast_zones -d 18000 # Coastal peninsula
-  
-  # River cities
-  python create_map_poster.py -c "London" -C "UK" -t noir -d 15000              # Thames curves
-  python create_map_poster.py -c "Budapest" -C "Hungary" -t copper_patina -d 8000  # Danube split
-  
-  # List themes
-  python create_map_poster.py --list-themes
-
-Options:
-  --city, -c        City name (required)
-  --country, -C     Country name (required)
-  --theme, -t       Theme name (default: feature_based)
-  --distance, -d    Map radius in meters (default: 29000)
-  --list-themes     List all available themes
-
-Distance guide:
-  4000-6000m   Small/dense cities (Venice, Amsterdam old center)
-  8000-12000m  Medium cities, focused downtown (Paris, Barcelona)
-  15000-20000m Large metros, full city view (Tokyo, Mumbai)
-
-Available themes can be found in the 'themes/' directory.
-Generated posters are saved to 'posters/' directory.
-""")
-
-def list_themes():
-    """List all available themes with descriptions."""
-    available_themes = get_available_themes()
-    if not available_themes:
-        print("No themes found in 'themes/' directory.")
-        return
-    
-    print("\nAvailable Themes:")
-    print("-" * 60)
-    for theme_name in available_themes:
-        theme_path = os.path.join(THEMES_DIR, f"{theme_name}.json")
-        try:
-            with open(theme_path, 'r') as f:
-                theme_data = json.load(f)
-                display_name = theme_data.get('name', theme_name)
-                description = theme_data.get('description', '')
-        except:
-            display_name = theme_name
-            description = ''
-        print(f"  {theme_name}")
-        print(f"    {display_name}")
-        if description:
-            print(f"    {description}")
-        print()
+    print(f"[OK] Done!")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Generate beautiful map posters for any city",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python create_map_poster.py --city "New York" --country "USA"
-  python create_map_poster.py --city Tokyo --country Japan --theme midnight_blue
-  python create_map_poster.py --city Paris --country France --theme noir --distance 15000
-  python create_map_poster.py --list-themes
-        """
-    )
-    
+    parser = argparse.ArgumentParser(description="City Map Poster Generator")
     parser.add_argument('--city', '-c', type=str, help='City name')
     parser.add_argument('--country', '-C', type=str, help='Country name')
-    parser.add_argument('--theme', '-t', type=str, default='feature_based', help='Theme name (default: feature_based)')
-    parser.add_argument('--distance', '-d', type=int, default=29000, help='Map radius in meters (default: 29000)')
-    parser.add_argument('--list-themes', action='store_true', help='List all available themes')
-    parser.add_argument('--format', '-f', default='png', choices=['png', 'svg', 'pdf'],help='Output format for the poster (default: png)')
-    parser.add_argument('--svg-size', type=int, help='Longest edge size in millimeters for SVG output (only used with --format svg)')
+    parser.add_argument('--theme', '-t', default='feature_based', help='Theme name')
+    parser.add_argument('--distance', '-d', type=int, default=15000, help='Map radius (shortest edge) in meters')
+    parser.add_argument('--ratio', '-r', default='2:3', help='Aspect ratio (e.g., 2:3, 3:2, 1:1, 16:9)')
+    parser.add_argument('--format', '-f', default='png', choices=['png', 'svg', 'pdf'], help='Output format')
+    parser.add_argument('--svg-size', type=int, default=300, help='Longest edge size in mm (for SVG)')
+    parser.add_argument('--lat', type=float, help='Manual Latitude')
+    parser.add_argument('--lon', type=float, help='Manual Longitude')
+    parser.add_argument('--list-themes', action='store_true')
     
     args = parser.parse_args()
     
-    # If no arguments provided, show examples
-    if len(os.sys.argv) == 1:
-        print_examples()
-        os.sys.exit(0)
-    
-    # List themes if requested
     if args.list_themes:
-        list_themes()
+        print("\nAvailable Themes:", ", ".join(get_available_themes()))
         os.sys.exit(0)
     
-    # Validate required arguments
     if not args.city or not args.country:
-        print("Error: --city and --country are required.\n")
-        print_examples()
+        print("Usage: python create_map_poster.py -c <city> -C <country> [options]")
         os.sys.exit(1)
     
-    # Validate theme exists
-    available_themes = get_available_themes()
-    if args.theme not in available_themes:
-        print(f"Error: Theme '{args.theme}' not found.")
-        print(f"Available themes: {', '.join(available_themes)}")
-        os.sys.exit(1)
-    
-    print("=" * 50)
-    print("City Map Poster Generator")
-    print("=" * 50)
-    
-    # Load theme
     THEME = load_theme(args.theme)
     
-    # Get coordinates and generate poster
     try:
-        coords = get_coordinates(args.city, args.country)
-        output_file = generate_output_filename(args.city, args.theme, args.format)
-        create_poster(args.city, args.country, coords, args.distance, output_file, args.format, args.svg_size)
-        
-        print("\n" + "=" * 50)
-        print("✓ Poster generation complete!")
-        print("=" * 50)
-        
+        coords = (args.lat, args.lon) if args.lat and args.lon else get_coordinates(args.city, args.country)
+        if coords:
+            outfile = generate_output_filename(args.city, args.theme, args.format, args.ratio)
+            create_poster(args.city, args.country, coords, args.distance, outfile, args.format, args.ratio, args.svg_size)
     except Exception as e:
-        print(f"\n✗ Error: {e}")
+        print(f"[ERROR] {e}")
         import traceback
         traceback.print_exc()
-        os.sys.exit(1)

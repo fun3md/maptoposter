@@ -1,0 +1,15 @@
+{
+  "name": "Grayscale Blueprint",
+  "description": "High-contrast monochrome technical drawing aesthetic",
+  "bg": "#000000",
+  "text": "#FFFFFF",
+  "gradient_color": "#000000",
+  "water": "#202020",
+  "parks": "#101010",
+  "road_motorway": "#FFFFFF",
+  "road_primary": "#f5f5f5",
+  "road_secondary": "#e8e8e8",
+  "road_tertiary": "#a5a5a5",
+  "road_residential": "#808080",
+  "road_default": "#303030"
+}
