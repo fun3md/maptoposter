@@ -4,12 +4,12 @@
   "bg": "#000000",
   "text": "#FFFFFF",
   "gradient_color": "#000000",
-  "water": "#202020",
+  "water": "#0a0a0a",
   "parks": "#101010",
   "road_motorway": "#FFFFFF",
-  "road_primary": "#f5f5f5",
-  "road_secondary": "#e8e8e8",
-  "road_tertiary": "#a5a5a5",
-  "road_residential": "#808080",
-  "road_default": "#303030"
+  "road_primary": "#fafafa",
+  "road_secondary": "#d0d0d0",
+  "road_tertiary": "#b0b0b0",
+  "road_residential": "#adadad",
+  "road_default": "#202020"
 }

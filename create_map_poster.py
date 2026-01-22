@@ -147,7 +147,7 @@ def get_coordinates(city, country, max_retries=3):
         except: pass
     return None
 
-def create_poster(city, country, point, dist, output_file, output_format, ratio_str, svg_size_mm=None):
+def create_poster(city, country, point, dist, output_file, output_format, ratio_str, offset_x, offset_y, svg_size_mm=None):
     print(f"\nGenerating map for {city}, {country}...")
     plt.rcParams['svg.fonttype'] = 'none'
 
@@ -170,11 +170,18 @@ def create_poster(city, country, point, dist, output_file, output_format, ratio_
     
     print(f"[DEBUG] Viewport Geometry: {view_width_m:.0f}m (W) x {view_height_m:.0f}m (H)")
 
-    # Calculate Fetch Distance (Bleed) - 10% buffer
+    # Calculate Fetch Distance (Bleed) - 10% buffer PLUS the offset amount
+    # We must increase fetch distance to ensure we have data if the user shifts the center
     longest_edge_m = max(view_width_m, view_height_m)
-    fetch_dist = (longest_edge_m / 2) * 1.1
     
-    print(f"[DEBUG] Download Radius: {fetch_dist:.0f}m")
+    # Base fetch is half the longest edge + 10%
+    base_fetch = (longest_edge_m / 2) * 1.1
+    
+    # Add the maximum offset to the fetch radius to prevent blank edges
+    max_offset = max(abs(offset_x), abs(offset_y))
+    fetch_dist = base_fetch + max_offset
+    
+    print(f"[DEBUG] Download Radius: {fetch_dist:.0f}m (Includes offset buffer)")
 
     # --- 2. DOWNLOAD DATA ---
     with tqdm(total=3, desc="Fetching map data", unit="step", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt}') as pbar:
@@ -207,11 +214,17 @@ def create_poster(city, country, point, dist, output_file, output_format, ratio_
     # --- 3. DESTRUCTIVE CLIPPING ---
     print("Performing destructive clipping...")
     
-    # Calculate Center Point (using the fetched graph's bounds to align perfectly)
-    # Note: We use the *projected* coordinates from the graph
+    # Calculate Center Point
+    # We use the bounds of the downloaded graph as the starting geometric center
     minx, miny, maxx, maxy = edges.total_bounds
-    x_center = (minx + maxx) / 2
-    y_center = (miny + maxy) / 2
+    
+    # APPLY OFFSET HERE
+    # Shift the center of the viewport by the user-requested meters
+    x_center = ((minx + maxx) / 2) + offset_x
+    y_center = ((miny + maxy) / 2) + offset_y
+    
+    if offset_x != 0 or offset_y != 0:
+        print(f"[DEBUG] Applied Center Offset: X={offset_x}m, Y={offset_y}m")
 
     # Create the Bounding Box Polygon (The "Cookie Cutter")
     west = x_center - (view_width_m / 2)
@@ -222,13 +235,11 @@ def create_poster(city, country, point, dist, output_file, output_format, ratio_
     clip_box = box(west, south, east, north)
     
     # Clip Roads (Edges)
-    # gpd.clip intersects the geometries with the box. Lines crossing the border are cut.
     clipped_edges = gpd.clip(edges, clip_box)
     
     # Clip Water
     if water is not None and not water.empty:
         clipped_water = gpd.clip(water, clip_box)
-        # Filter out empty geometries or points if any resulted from clip
         clipped_water = clipped_water[clipped_water.geometry.type.isin(['Polygon', 'MultiPolygon'])]
     else:
         clipped_water = None
@@ -273,22 +284,38 @@ def create_poster(city, country, point, dist, output_file, output_format, ratio_
     if clipped_parks is not None and not clipped_parks.empty:
         clipped_parks.plot(ax=ax, facecolor=THEME['parks'], edgecolor='none', zorder=2)
     
-    # Plot Roads
+# Plot Roads
     if not clipped_edges.empty:
-        # We need to recalculate colors/widths because the indices might have changed 
-        # or we are using a pure GDF now, not a Graph object.
-        c_colors, c_widths = get_attributes_from_gdf(clipped_edges)
-        
-        clipped_edges.plot(
-            ax=ax, 
-            color=c_colors, 
-            linewidth=c_widths, 
-            zorder=3
-        )
+        # 1. SEPARATE BRIDGES
+        # Check if 'bridge' column exists (it might not if no bridges are in the area)
+        if 'bridge' in clipped_edges.columns:
+            bridges = clipped_edges[clipped_edges['bridge'] == 'yes']
+            roads = clipped_edges[clipped_edges['bridge'] != 'yes']
+        else:
+            bridges = gpd.GeoDataFrame()
+            roads = clipped_edges
+
+        # 2. PLOT STANDARD ROADS (Bottom Layer)
+        if not roads.empty:
+            r_colors, r_widths = get_attributes_from_gdf(roads)
+            roads.plot(ax=ax, color=r_colors, linewidth=r_widths, zorder=3)
+
+        # 3. PLOT BRIDGE CASINGS (The "Eraser" Layer)
+        # We draw the bridge wider and in the background color to "cut" through water/roads below
+        if not bridges.empty:
+            b_colors, b_widths = get_attributes_from_gdf(bridges)
+            
+            # Make casing 2.5x thicker than the road
+            casing_widths = [w * 2.5 for w in b_widths]
+            
+            # Plot Casing (Background Color)
+            bridges.plot(ax=ax, color=THEME['bg'], linewidth=casing_widths, zorder=4)
+            
+            # 4. PLOT BRIDGE TOPS (The Road Layer)
+            # Plot the actual road on top of the casing
+            bridges.plot(ax=ax, color=b_colors, linewidth=b_widths, zorder=5)
     
     # --- 6. SET VIEWPORT (Strict Alignment) ---
-    # Even though we clipped the data, we still set the limits to ensure 
-    # the canvas matches the bounding box exactly (no whitespace drift).
     ax.set_xlim(west, east)
     ax.set_ylim(south, north)
     ax.set_aspect('equal')
@@ -366,6 +393,8 @@ if __name__ == "__main__":
     parser.add_argument('--ratio', '-r', default='2:3', help='Aspect ratio (e.g., 2:3, 3:2, 1:1, 16:9)')
     parser.add_argument('--format', '-f', default='png', choices=['png', 'svg', 'pdf'], help='Output format')
     parser.add_argument('--svg-size', type=int, default=300, help='Longest edge size in mm (for SVG)')
+    parser.add_argument('--offset-x', type=float, default=0, help='Center offset X in meters (East is +, West is -)')
+    parser.add_argument('--offset-y', type=float, default=0, help='Center offset Y in meters (North is +, South is -)')
     parser.add_argument('--lat', type=float, help='Manual Latitude')
     parser.add_argument('--lon', type=float, help='Manual Longitude')
     parser.add_argument('--list-themes', action='store_true')
@@ -386,7 +415,10 @@ if __name__ == "__main__":
         coords = (args.lat, args.lon) if args.lat and args.lon else get_coordinates(args.city, args.country)
         if coords:
             outfile = generate_output_filename(args.city, args.theme, args.format, args.ratio)
-            create_poster(args.city, args.country, coords, args.distance, outfile, args.format, args.ratio, args.svg_size)
+            create_poster(
+                args.city, args.country, coords, args.distance, outfile, args.format, 
+                args.ratio, args.offset_x, args.offset_y, args.svg_size
+            )
     except Exception as e:
         print(f"[ERROR] {e}")
         import traceback
