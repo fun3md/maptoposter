@@ -42,6 +42,43 @@ python create_map_poster.py --city <city> --country <country> [options]
 | `--distance` | `-d` | Map radius in meters | 29000 |
 | `--list-themes` | | List all available themes | |
 
+
+# Workflow Usage
+
+This pipeline allows you to generate high-resolution maps, simulate their appearance as laser-exposed cyanotypes, and prepare the final files for laser engraving with precise dimensional calibration.
+
+### 1. Generate Source Map
+Create a high-resolution grayscale map. The following command generates a 1:1 aspect ratio map of Magdeburg, Germany, with specific offsets and a 7500px diameter/size.
+
+```bash
+python create_map_poster.py -c "Magdeburg" -C "Germany" -t grayscale -d 7500 --offset-y -1150 --offset-x -800 -r 1:1
+```
+
+### 2. Simulate Result (Soft Proofing)
+Before burning, visualize how the image will look as a physical cyanotype. This script applies the measured response curve (LUT) and adds a paper texture and Prussian Blue color grading to mimic the chemical process.
+
+```bash
+python simulate_cyanotype.py .\posters\magdeburg_grayscale_1-1_20260121_230549.png .\luts\master_lut_whittaker.csv -o .\posters\magdeburg-1-1-sim.png
+```
+
+### 3. Apply Calibration & Resize for Laser
+Prepare the final image for the machine. This script applies the correction LUT (to linearize the laser's output) and resizes the image to your exact physical paper size based on your laser's line interval.
+
+**DPI vs. Line Interval Guide:**
+For lasers, DPI and "Line Interval" are mathematically linked. Use the following DPI settings based on your machine's interval:
+
+*   **0.10mm Interval:** Use `--dpi 254`
+*   **0.08mm Interval:** Use `--dpi 317.5`
+*   **0.05mm Interval:** Use `--dpi 508`
+
+**Example Command:**
+To prepare an image to be exactly **200mm** (longest edge) suitable for a laser running at **0.1mm line interval**:
+
+```bash
+python apply_lut.py .\posters\magdeburg_grayscale_1-1_20260121_230549.png .\luts\master_lut_weighted.csv -o laser_ready.png --size_mm 200 --dpi 254
+```
+
+
 ### Examples
 
 ```bash
@@ -75,6 +112,8 @@ python create_map_poster.py -c "Budapest" -C "Hungary" -t copper_patina -d 8000 
 # List available themes
 python create_map_poster.py --list-themes
 ```
+
+
 
 ### Distance Guide
 
