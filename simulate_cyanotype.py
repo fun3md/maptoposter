@@ -69,6 +69,7 @@ def simulate_print(image_path, lut_path, output_path, simulate_texture=True):
     else:
         gray = img
 
+    opencv_lut = np.flipud(opencv_lut)
     # 3. Apply the Density Response (Simulate the Tone Curve)
     # This distorts the image based on how the laser actually burns the paper
     print("Applying density simulation...")
@@ -80,7 +81,7 @@ def simulate_print(image_path, lut_path, output_path, simulate_texture=True):
     
     # Define Colors (BGR format for OpenCV)
     # Deep Prussian Blue
-    ink_color = (130, 55, 10) 
+    ink_color = (41,20 , 0) 
     # Creamy Watercolor Paper
     paper_color = (235, 245, 255) 
     
