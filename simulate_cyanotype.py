@@ -33,7 +33,20 @@ def apply_gradient_map(grayscale_img, dark_color, light_color):
     
     return np.clip(result, 0, 255).astype(np.uint8)
 
-def simulate_print(image_path, lut_path, output_path, simulate_texture=True):
+def simulate_dot_gain(image, spread=1, softening=0.8):
+    # Cyanotype "ink" is dark, so we expand the black areas
+    # We use a morphology filter to expand the dark pixels (erosion on grayscale)
+    kernel = np.ones((3,3), np.uint8)
+    ink_spread = cv2.erode(image, kernel, iterations=spread)
+    
+    # Soften the edges to simulate UV light scatter/bleeding
+    # This turns hard digital dots into soft organic shapes
+    blurred = cv2.GaussianBlur(ink_spread, (3,3), 0)
+    
+    # Blend the original dither with the spread version
+    return cv2.addWeighted(image, 1 - softening, blurred, softening, 0)
+
+def simulate_print(image_path, lut_path, output_path, gain_amount, simulate_texture=True):
     # 1. Load the Response Curve (LUT)
     print(f"Loading Response Curve from: {lut_path}")
     try:
@@ -75,6 +88,8 @@ def simulate_print(image_path, lut_path, output_path, simulate_texture=True):
     print("Applying density simulation...")
     simulated_density = cv2.LUT(gray, opencv_lut)
 
+    printed_dots = simulate_dot_gain(simulated_density, spread=gain_amount)
+
     # 4. Apply Cyanotype Color Grading
     # Prussian Blue (approx BGR: 120, 60, 20) to Paper White (BGR: 240, 248, 255)
     print("Applying Cyanotype color map...")
@@ -90,7 +105,7 @@ def simulate_print(image_path, lut_path, output_path, simulate_texture=True):
     # 5. Simulate Paper Texture
     if simulate_texture:
         print("Adding paper grain texture...")
-        color_img = add_paper_grain(color_img, intensity=0.04)
+        #color_img = add_paper_grain(color_img, intensity=0.04)
 
     # 6. Save
     print(f"Saving simulation to: {output_path}")
@@ -104,7 +119,8 @@ if __name__ == "__main__":
     parser.add_argument("lut", help="CSV containing the Response Curve")
     parser.add_argument("-o", "--output", help="Output filename", default="simulated_cyanotype.png")
     parser.add_argument("--no-texture", action="store_true", help="Disable paper grain simulation")
+    parser.add_argument("-g", "--gain", type=int, default=1, help="Amount of dot spread (1-3)")
     
     args = parser.parse_args()
     
-    simulate_print(args.image, args.lut, args.output, not args.no_texture)
+    simulate_print(args.image, args.lut, args.output, args.gain, not args.no_texture)
