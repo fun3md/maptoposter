@@ -3,3 +3,12 @@ env/
 .env/
 posters/*
 *.png
+svg/
+test_images/
+bluenoise/*
+!bluenoise/
+!bluenoise/128_128
+bluenoise/128_128/*
+!bluenoise/128_128/LDR_LLL1_0.png
+svg\
+target.*

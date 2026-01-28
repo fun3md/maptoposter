@@ -49,7 +49,33 @@ def get_bayer_noise(size_h, size_w):
     
     return tiled[:size_h, :size_w]
 
-def process_adaptive_hybrid(image_path, csv_path, output_path, size_mm, dpi, max_steps, min_spread, max_spread, gamma):
+def load_dither_config():
+    """Load dithering defaults from defaults.yaml."""
+    config_path = "defaults.yaml"
+    if not os.path.exists(config_path):
+        return {}
+    config = {}
+    with open(config_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" in line:
+                key, value = line.split(":", 1)
+                key = key.strip()
+                value = value.strip()
+                # Try to interpret numbers
+                try:
+                    value = float(value)
+                except ValueError:
+                    if value.lower() in ("true", "false"):
+                        value = value.lower() == "true"
+                    else:
+                        value = value.lower()
+                config[key] = value
+    return config
+
+def process_adaptive_hybrid(image_path, csv_path, output_path, size_mm, dpi, max_steps, min_spread, max_spread, gamma, dither_type='bayer', strength=1.0, edge_damping=0.5):
     # 1. Load Data
     lut_x, lut_y, lut_is_inverted = load_lut(csv_path)
 
@@ -91,7 +117,7 @@ def process_adaptive_hybrid(image_path, csv_path, output_path, size_mm, dpi, max
     print(f"Quantizing to {max_steps} hardware power steps...")
     step_scale = max_steps / 255.0
     ideal_steps = corrected_255 * step_scale
-    
+
     # --- ADAPTIVE DITHERING LOGIC ---
     print(f"Calculating Adaptive Spread (Min: {min_spread}, Max: {max_spread})...")
 
@@ -100,12 +126,12 @@ def process_adaptive_hybrid(image_path, csv_path, output_path, size_mm, dpi, max
     gx = cv2.Sobel(ideal_steps, cv2.CV_64F, 1, 0, ksize=3)
     gy = cv2.Sobel(ideal_steps, cv2.CV_64F, 0, 1, ksize=3)
     gradient_mag = cv2.magnitude(gx, gy)
-    
+
     # B. Create Flatness Mask (0.0 = Busy/Edge, 1.0 = Flat)
     # We use exponential decay. 
     # Sensitivity factor 5.0 means gradients > 5 (out of 255) start reducing spread rapidly.
     flatness_mask = np.exp(-gradient_mag / 10.0)
-    
+
     # C. Calculate Adaptive Spread Map
     # Where Flatness is 1, we use Max Spread. Where Flatness is 0, we use Min Spread.
     current_spread_map = min_spread + (flatness_mask * (max_spread - min_spread))
@@ -115,29 +141,36 @@ def process_adaptive_hybrid(image_path, csv_path, output_path, size_mm, dpi, max
     dist_from_bottom = ideal_steps
     dist_from_top = max_steps - ideal_steps
     edge_distance = np.minimum(dist_from_bottom, dist_from_top)
-    
+
     # We divide by current_spread_map to ensure protection scales with the spread size
-    damping_mask = np.clip(edge_distance / (current_spread_map * 0.5 + 0.001), 0.0, 1.0)
-    
+    damping_mask = np.clip(edge_distance / (current_spread_map * (0.5 * edge_damping) + 0.001), 0.0, 1.0)
+
     # E. Combine Everything
     # Final Noise = Base Bayer * Adaptive Spread * Edge Protection
-    base_bayer = get_bayer_noise(img.shape[0], img.shape[1])
-    
+    # Generate base Bayer noise or alternative based on dither_type
+    if dither_type == "random":
+        # Random noise with similar distribution (-0.5 to +0.5)
+        base_bayer = np.random.rand(img.shape[0], img.shape[1]) * 1.0 - 0.5
+    else:
+        base_bayer = get_bayer_noise(img.shape[0], img.shape[1])
+    # Apply strength scaling
+    base_bayer = base_bayer * strength
+
     effective_noise = base_bayer * current_spread_map * damping_mask
-    
+
     dithered_steps = ideal_steps + effective_noise
     final_steps = np.round(dithered_steps)
     final_steps = np.clip(final_steps, 0, max_steps)
-    
+
     # --- END ADAPTIVE LOGIC ---
 
-    # 7. Convert BACK to 0-255 for Laser Software
+    # 6. Convert BACK to 0-255 for Laser Software
     print("Encoding final image...")
     inverse_scale = 255.0 / max_steps
     final_image_array = final_steps * inverse_scale
     final_image_array = np.clip(np.round(final_image_array), 0, 255).astype(np.uint8)
 
-    # 8. Save
+    # 7. Save
     print(f"Saving to {output_path}")
     Image.fromarray(final_image_array).save(output_path, dpi=(int(dpi), int(dpi)))
     print("Done.")
@@ -153,7 +186,35 @@ if __name__ == "__main__":
     parser.add_argument("--min_spread", type=float, default=1.0, help="Spread on Edges/Details (Low noise)")
     parser.add_argument("--max_spread", type=float, default=4.0, help="Spread on Flat Areas (High blending)")
     parser.add_argument("-g", "--gamma", type=float, default=1.0, help="add gamma")
+    # New dithering parameters
+    parser.add_argument("--dither_type", help="Type of dithering to use (e.g., bayer, random)", default="bayer")
+    parser.add_argument("--strength", type=float, help="Strength multiplier for dithering noise", default=1.0)
+    parser.add_argument("--edge_damping", type=float, help="Edge damping factor for protecting blacks/whites", default=0.5)
     
     args = parser.parse_args()
     
-    process_adaptive_hybrid(args.image, args.csv, args.output, args.size_mm, args.dpi, args.steps, args.min_spread, args.max_spread, args.gamma)
+    # Load default config
+    config = load_dither_config()
+    
+    # Determine final values, using CLI args if provided, else config defaults
+    dither_type_final = args.dither_type if args.dither_type else config.get('dither_type', 'bayer')
+    strength_final = args.strength if args.strength else config.get('strength', 1.0)
+    edge_damping_final = args.edge_damping if args.edge_damping else config.get('edge_damping', 0.5)
+    min_spread_final = args.min_spread if args.min_spread else config.get('min_spread', 1.0)
+    max_spread_final = args.max_spread if args.max_spread else config.get('max_spread', 4.0)
+    gamma_final = args.gamma if args.gamma else config.get('gamma', 1.0)
+    
+    process_adaptive_hybrid(
+        args.image,
+        args.csv,
+        args.output,
+        args.size_mm,
+        args.dpi,
+        args.steps,
+        min_spread_final,
+        max_spread_final,
+        gamma_final,
+        dither_type_final,
+        strength_final,
+        edge_damping_final
+    )

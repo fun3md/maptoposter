@@ -86,9 +86,11 @@ def simulate_print(image_path, lut_path, output_path, gain_amount, simulate_text
     # 3. Apply the Density Response (Simulate the Tone Curve)
     # This distorts the image based on how the laser actually burns the paper
     print("Applying density simulation...")
+    
     simulated_density = cv2.LUT(gray, opencv_lut)
-
     printed_dots = simulate_dot_gain(simulated_density, spread=gain_amount)
+
+    
 
     # 4. Apply Cyanotype Color Grading
     # Prussian Blue (approx BGR: 120, 60, 20) to Paper White (BGR: 240, 248, 255)
@@ -100,7 +102,7 @@ def simulate_print(image_path, lut_path, output_path, gain_amount, simulate_text
     # Creamy Watercolor Paper
     paper_color = (235, 245, 255) 
     
-    color_img = apply_gradient_map(simulated_density, ink_color, paper_color)
+    color_img = apply_gradient_map(printed_dots, ink_color, paper_color)
 
     # 5. Simulate Paper Texture
     if simulate_texture:

@@ -177,6 +177,17 @@ Create a JSON file in `themes/` directory:
 ```
 
 ## Laser Cutting Integration
+## LUT Utilities Overview
+
+The `lut_utils.py` module provides tools for loading, inverting, and interpolating lookup tables (LUTs) used in the calibration pipeline.
+
+### Functions
+- `load_lut(path: str) -> Callable`: Loads a CSV LUT file and returns an interpolatable function.
+- `invert_lut(lut_func: Callable) -> Callable`: Returns an inverted version of a LUT for reverse mapping.
+- `interpolate_lut(lut_func: Callable, x: Union[float, np.ndarray]) -> Union[float, np.ndarray]`: Wrapper for applying an interpolated LUT to input values.
+- `CalibrationPipeline(lut_paths: List[str])`: Sequence loader that applies multiple LUTs to data.
+
+These utilities enable modular handling of LUTs, making it easier to swap, invert, or chain calibration curves in the map poster generation workflow.
 
 This project also includes a powerful **SVG to G-code converter** for laser cutting applications. The generated map posters can be converted to G-code for CNC laser cutting.
 
@@ -324,3 +335,55 @@ G = ox.graph_from_point(point, dist=dist, network_type='walk')   # pedestrian
 - Cache coordinates locally to avoid Nominatim rate limits
 - Use `network_type='drive'` instead of `'all'` for faster renders
 - Reduce `dpi` from 300 to 150 for quick previews
+  
+## Workflow Diagram  
+  
+```mermaid  
+graph LR  
+    Calibration -- -- -- 
+```  
+  
+## Usage  
+  
+```bash  
+python calibrate_cyanotype.py --output-lut inverse_lut.csv  
+python process_image.py input.png output.png  
+  
+## Workflow Diagram  
+  
+```mermaid  
+graph LR  
+    Calibration -- -- -- 
+```  
+  
+## Usage  
+  
+```bash  
+python calibrate_cyanotype.py --output-lut inverse_lut.csv  
+python process_image.py input.png output.png  
+  
+## Workflow Diagram  
+  
+```mermaid  
+graph LR  
+    Calibration -- -- -- 
+```  
+  
+## Usage  
+  
+```bash  
+python calibrate_cyanotype.py --output-lut inverse_lut.csv  
+python process_image.py input.png output.png  
+  
+## Workflow Diagram  
+  
+```mermaid  
+graph LR  
+    Calibration -- -- -- 
+```  
+  
+## Usage  
+  
+```bash  
+python calibrate_cyanotype.py --output-lut inverse_lut.csv  
+python process_image.py input.png output.png  
