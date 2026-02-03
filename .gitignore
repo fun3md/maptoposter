@@ -13,3 +13,5 @@ bluenoise/128_128/*
 svg\
 target.*
 jupyter/out_wash.pnm
+jupyter/*.png
+jupyter/*.nc
